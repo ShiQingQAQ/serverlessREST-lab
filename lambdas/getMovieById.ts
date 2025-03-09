@@ -1,76 +1,96 @@
 import { APIGatewayProxyHandlerV2 } from "aws-lambda";
-
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  QueryCommand,
+} from "@aws-sdk/lib-dynamodb";
 
 const ddbDocClient = createDDbDocClient();
 
-export const handler: APIGatewayProxyHandlerV2 = async (event, context) =>  {
+export const handler: APIGatewayProxyHandlerV2 = async (event, context) => {
   try {
     console.log("[EVENT]", JSON.stringify(event));
-    const pathParameters  = event?.pathParameters;
-    const movieId = pathParameters?.movieId ? parseInt(pathParameters.movieId) : undefined;
     
-    if (!movieId) {
+    // 1. 验证路径参数
+    const movieId = parseInt(event.pathParameters?.movieId || "");
+    if (isNaN(movieId)) {
       return {
-        statusCode: 404,
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ Message: "Missing movie Id" }),
+        statusCode: 400,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "Invalid movie ID format" }),
       };
     }
 
-    const commandOutput = await ddbDocClient.send(
+    // 2. 获取电影基本信息
+    const movieResult = await ddbDocClient.send(
       new GetCommand({
-        TableName: process.env.TABLE_NAME,
+        TableName: process.env.TABLE_NAME!,
         Key: { id: movieId },
       })
     );
-    console.log("GetCommand response: ", commandOutput);
-    if (!commandOutput.Item) {
+
+    if (!movieResult.Item) {
       return {
         statusCode: 404,
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ Message: "Invalid movie Id" }),
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "Movie not found" }),
       };
     }
-    const body = {
-      data: commandOutput.Item,
-    };
 
-    // Return Response
+    // 3. 准备响应数据
+    const responseData: any = { ...movieResult.Item };
+
+    // 4. 处理演员信息查询
+    const includeCast = event.queryStringParameters?.cast === "true";
+    if (includeCast) {
+      const castResult = await ddbDocClient.send(
+        new QueryCommand({
+          TableName: process.env.MOVIECAST_TABLE_NAME!,
+          KeyConditionExpression: "movieId = :movieId",
+          ExpressionAttributeValues: {
+            ":movieId": movieId,
+          },
+        })
+      );
+
+      responseData.cast = castResult.Items || [];
+    }
+
+    // 5. 返回最终响应
     return {
       statusCode: 200,
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(body),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ data: responseData }),
     };
   } catch (error: any) {
-    console.log(JSON.stringify(error));
+    console.error(JSON.stringify(error));
     return {
       statusCode: 500,
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ error }),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        error: "Internal server error",
+        details: error.message,
+      }),
     };
   }
 };
 
 function createDDbDocClient() {
-  const ddbClient = new DynamoDBClient({ region: process.env.REGION });
-  const marshallOptions = {
-    convertEmptyValues: true,
-    removeUndefinedValues: true,
-    convertClassInstanceToMap: true,
+  const ddbClient = new DynamoDBClient({
+    region: process.env.REGION || "eu-west-1",
+  });
+  
+  const translateConfig = {
+    marshallOptions: {
+      convertEmptyValues: true,
+      removeUndefinedValues: true,
+      convertClassInstanceToMap: true,
+    },
+    unmarshallOptions: {
+      wrapNumbers: false,
+    },
   };
-  const unmarshallOptions = {
-    wrapNumbers: false,
-  };
-  const translateConfig = { marshallOptions, unmarshallOptions };
+  
   return DynamoDBDocumentClient.from(ddbClient, translateConfig);
 }
